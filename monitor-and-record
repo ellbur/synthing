@@ -1,0 +1,110 @@
+#!/usr/bin/env rakudo
+
+# vim: ft=raku
+
+sub get-midi-devices {
+  gather {
+    my $working-client = Nil;
+    my @lines = run('aconnect', '--list', :out).out.lines;
+    for @lines -> $line {
+      if $line ~~ /.*client\s+(\d+).*/ {
+        my $this-client = $0;
+        if $line ~~ /.*\[.*<|w>card\=.*\]/ {
+          $working-client = $this-client;
+        }
+        else {
+          $working-client = Nil;
+        }
+      }
+      elsif $line ~~ /\s*(\d+)\s*\'.*/ {
+        if $working-client.defined {
+          take "$working-client:$0"
+        }
+      }
+    }
+  }
+}
+
+my %running-recordings;
+my $new-procs = Channel.new;
+my $terminated-procs = Channel.new;
+
+sub update-running-recordings {
+  my @midi-devices = get-midi-devices;
+  
+  say "Processing devices [{@midi-devices}]";
+  
+  for @midi-devices -> $device {
+    if %running-recordings{$device}:!exists {
+      my $time = DateTime.now.Str;
+      my $escaped-time = $time.subst(':', '.', :g);
+      my $escaped-device = $device.subst(':', '.', :g);
+      my $file = "$escaped-device.$escaped-time.midi";
+      
+      say "Recording $file";
+      
+      my $record-proc = Proc::Async.new('sh', '-c', "sleep 2; arecordmidi -p $device $file");
+      
+      %running-recordings{$device} = $record-proc;
+      
+      say "Giving $device to new-procs";
+      $new-procs.send(($device, $record-proc));
+    }
+  }
+  
+  my $midi-devices-set = Set(@midi-devices);
+  say "midi-devices-set contains:";
+  for $midi-devices-set -> $d {
+    say " * $d";
+  }
+  
+  for %running-recordings.kv -> $device, $record-proc {
+    say "Checking $device against set [{$midi-devices-set}]";
+    if $midi-devices-set{$device}:!exists {
+      say "Killing $device";
+      $terminated-procs.send($device);
+    }
+    else {
+      say "Still in there ({$midi-devices-set})";
+    }
+  }
+}
+
+say "Starting proc";
+my $monitor-proc = Proc::Async.new('udevadm', 'monitor');
+say "Started proc";
+
+say "Main react loop...";
+react {
+  whenever $monitor-proc.stdout.lines -> $line {
+    say "Got line $line";
+    update-running-recordings;
+    say "CURRENT RECORDING DEVICES: [{%running-recordings.keys}]";
+  }
+  
+  whenever $new-procs -> ($device, $record-proc) {
+    say "Got $device from new-procs";
+    whenever $record-proc.start {
+      say "Proc for $device exited";
+      if %running-recordings{$device}:exists {
+        if %running-recordings{$device} === $record-proc {
+          %running-recordings{$device}:delete;
+          update-running-recordings;
+        }
+      }
+    }
+  }
+  
+  whenever $terminated-procs -> $device {
+    if %running-recordings{$device}:exists {
+      my $record-proc = %running-recordings{$device};
+      %running-recordings{$device}:delete;
+      $record-proc.kill;
+    }
+  }
+  
+  whenever $monitor-proc.start {
+    say "Monitor finished";
+  }
+}
+
