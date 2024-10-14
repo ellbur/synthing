@@ -43,7 +43,7 @@ sub update-running-recordings {
       
       say "Recording $file";
       
-      my $record-proc = Proc::Async.new('sh', '-c', "sleep 2; arecordmidi -p $device $file");
+      my $record-proc = Proc::Async.new('sh', '-c', "sleep 2; arecordmidi-live -p $device $file");
       
       %running-recordings{$device} = $record-proc;
       
